@@ -4,6 +4,8 @@
 import pathlib
 import re
 import sys
+import hashlib
+import urllib.request
 
 kernel = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "kernel")
 drv = kernel / "drivers" / "kernelsu"
@@ -34,6 +36,12 @@ SHIM = f"""/* {MARK} */
 #ifndef copy_from_kernel_nofault
 #define copy_from_kernel_nofault(dst, src, size) memcpy((dst), (src), (size))
 #endif
+#ifndef copy_from_user_nofault
+#define copy_from_user_nofault(dst, src, size) copy_from_user((dst), (src), (size))
+#endif
+#ifndef copy_to_user_nofault
+#define copy_to_user_nofault(dst, src, size) copy_to_user((dst), (src), (size))
+#endif
 #endif
 
 /* 4.19 的 task_work_add 第三参是 bool notify，没有 TWA_RESUME 枚举（5.9 引入） */
@@ -61,6 +69,8 @@ needles = (
     "TWA_RESUME",
     "copy_to_kernel_nofault",
     "copy_from_kernel_nofault",
+    "copy_from_user_nofault",
+    "copy_to_user_nofault",
     "SECCOMP_ARCH_NATIVE_NR",
     "put_task_struct",
     "fallthrough",
@@ -100,7 +110,7 @@ print(f"[+] compat patched files: {patched}")
 kb = drv / "Kbuild"
 if kb.exists():
     text = kb.read_text(encoding="utf-8", errors="replace")
-    if "security/selinux" not in text:
+    if "subdir-ccflags-y += -I$(objtree)/security/selinux" not in text:
         text += (
             "\n# 4.19 compat: flask.h 生成在 $(objtree)/security/selinux，跨目录编译需要显式 include\n"
             "subdir-ccflags-y += -I$(objtree)/security/selinux\n"
@@ -226,3 +236,108 @@ if prof.exists():
         )
         prof.write_text(t, encoding="utf-8")
         print("[+] policy/app_profile.c: seccomp.filter_count 已加版本门控")
+
+# The 4.19 SELinux database uses selinux_state.ss and a rwlock. SukiSU 4.3.0
+# assumes the newer, RCU-replaceable selinux_policy object. Use the older
+# policy editor from the KernelSU fork already used by this kernel family.
+# Pin both the source commit and file digests so CI cannot silently change it.
+COMPAT_COMMIT = "f8aeac629022114d6b366b17048965a28ff398e8"
+COMPAT_SHA256 = {
+    "rules.c": "ff2371426688bf160d9b13a230f9863679b58b858ad86a5f696a3538511cdc04",
+    "sepolicy.c": "0b6e2200692d04303d4ee6e66f24cccf31cd2f5533d250fea11e15971b3c0919",
+}
+
+
+def fetch_compat(name):
+    url = f"https://raw.githubusercontent.com/backslashxx/KernelSU/{COMPAT_COMMIT}/kernel/selinux/{name}"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        data = response.read(128 * 1024 + 1)
+    if len(data) > 128 * 1024 or hashlib.sha256(data).hexdigest() != COMPAT_SHA256[name]:
+        sys.exit(f"[!] 4.19 SELinux compat source hash mismatch: {name}")
+    return data.decode("utf-8")
+
+
+selinux_header = kernel / "security" / "selinux" / "include" / "security.h"
+services_header = kernel / "security" / "selinux" / "ss" / "services.h"
+policydb_header = kernel / "security" / "selinux" / "ss" / "policydb.h"
+if not all(p.is_file() for p in (selinux_header, services_header, policydb_header)):
+    sys.exit("[!] 4.19 SELinux headers are missing")
+if ("struct selinux_ss *ss;" not in selinux_header.read_text(encoding="utf-8") or
+        "policy_rwlock;" not in services_header.read_text(encoding="utf-8") or
+        "type_val_to_struct_array;" not in policydb_header.read_text(encoding="utf-8")):
+    sys.exit("[!] unexpected 4.19 SELinux layout; do not apply the compat editor")
+
+rules = drv / "selinux" / "rules.c"
+rules_text = rules.read_text(encoding="utf-8")
+if "KSU_419_RULES" not in rules_text:
+    if "struct selinux_policy *backup_sepolicy;" not in rules_text:
+        sys.exit("[!] unexpected SukiSU rules.c layout")
+    rules_header = rules_text.split("struct selinux_policy *backup_sepolicy;", 1)[0]
+    rules_header += "#include <linux/stop_machine.h>\n#include <linux/cpu.h>\n#include <linux/preempt.h>\n"
+    rules_header += "#define KSU_COMPAT_USE_SELINUX_STATE 1 /* KSU_419_RULES */\n"
+    rules.write_text(rules_header + fetch_compat("rules.c"), encoding="utf-8")
+    print("[+] selinux/rules.c: use pinned 4.19 policy editor")
+
+sepolicy = drv / "selinux" / "sepolicy.c"
+sepolicy_text = sepolicy.read_text(encoding="utf-8")
+if "KSU_419_SEPOLICY" not in sepolicy_text:
+    if "#define KSU_SUPPORT_ADD_TYPE" not in sepolicy_text:
+        sys.exit("[!] unexpected SukiSU sepolicy.c layout")
+    sepolicy_header = sepolicy_text.split("#define KSU_SUPPORT_ADD_TYPE", 1)[0]
+    sepolicy_header += "#include <linux/flex_array.h>\n"
+    sepolicy_header += "#define KSU_TYPE_VAL_TO_STRUCT_ARRAY 1 /* KSU_419_SEPOLICY */\n"
+    sepolicy.write_text(sepolicy_header + fetch_compat("sepolicy.c"), encoding="utf-8")
+    print("[+] selinux/sepolicy.c: use pinned 4.19 policy database adapter")
+
+sepolicy_h = drv / "selinux" / "sepolicy.h"
+header_text = sepolicy_h.read_text(encoding="utf-8")
+if "KSU_419_SEPOLICY_H" not in header_text:
+    if ("struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);" not in header_text or
+            "void ksu_destroy_sepolicy(struct selinux_policy *orig);" not in header_text):
+        sys.exit("[!] unexpected SukiSU sepolicy.h layout")
+    header_text = header_text.replace(
+        "struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);",
+        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) /* KSU_419_SEPOLICY_H */\n"
+        "struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);",
+    )
+    header_text = header_text.replace(
+        "void ksu_destroy_sepolicy(struct selinux_policy *orig);",
+        "void ksu_destroy_sepolicy(struct selinux_policy *orig);\n#endif",
+    )
+    sepolicy_h.write_text(header_text, encoding="utf-8")
+
+selinux = drv / "selinux" / "selinux.c"
+selinux_text = selinux.read_text(encoding="utf-8")
+if "KSU_419_CRED" not in selinux_text:
+    selinux_text = selinux_text.replace(
+        '#include "selinux.h"',
+        '#include "selinux.h"\n#define selinux_cred(cred) ((struct task_security_struct *)(cred)->security) /* KSU_419_CRED */',
+        1,
+    )
+    selinux.write_text(selinux_text, encoding="utf-8")
+    print("[+] selinux/selinux.c: use 4.19 cred security field")
+
+# selinux_hide requires a second, independent selinux_policy snapshot, which
+# the 4.19 SELinux subsystem does not have. Keep root policy changes enabled.
+hide_stub = drv / "feature" / "selinux_hide_stub.c"
+if not hide_stub.exists():
+    hide_stub.write_text('''#include "feature/selinux_hide.h"
+
+void ksu_selinux_hide_init(void) {}
+void ksu_selinux_hide_exit(void) {}
+void ksu_selinux_hide_drop_backup_if_unused(void) {}
+void ksu_selinux_hide_handle_second_stage(void) {}
+void ksu_selinux_hide_handle_post_fs_data(void) {}
+''', encoding="utf-8")
+    print("[+] created feature/selinux_hide_stub.c")
+
+if kb.exists():
+    text = kb.read_text(encoding="utf-8")
+    marker = "kernelsu-objs += feature/selinux_hide.o"
+    if marker in text and "selinux_hide_stub.o" not in text:
+        text = text.replace(marker,
+                            "ifeq ($(VERSION),4)\n"
+                            "kernelsu-objs += feature/selinux_hide_stub.o\n"
+                            "else\n" + marker + "\nendif")
+        kb.write_text(text, encoding="utf-8")
+        print("[+] Kbuild: 4.x uses selinux_hide_stub.o")
