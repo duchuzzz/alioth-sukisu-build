@@ -61,11 +61,19 @@ jobs:
           echo "drivers/Makefile:"; grep -n kernelsu drivers/Makefile || true
           echo "drivers/Kconfig:";  grep -n kernelsu drivers/Kconfig || true
 
+      - name: 缓存工具链（省 2 分钟）
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/toolchain/llvm
+            kernel/toolchain/python2
+          key: alioth-toolchain-clang-standalone-v1
+
       - name: 工具链（clang-standalone + python2）
         working-directory: kernel
         run: |
-          git clone --depth 1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git toolchain/llvm
-          git clone --depth 1 https://github.com/KopsourcesORG/python-2.7.18-prebuilt.git toolchain/python2
+          [ -d toolchain/llvm ]   || git clone --depth 1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git toolchain/llvm
+          [ -d toolchain/python2 ] || git clone --depth 1 https://github.com/KopsourcesORG/python-2.7.18-prebuilt.git toolchain/python2
           ./toolchain/llvm/bin/clang --version | head -n 1
 
       - name: 接入 SukiSU ${{ inputs.sukisu_ref }}
@@ -84,6 +92,15 @@ jobs:
           if [ "${{ inputs.enable_kpm }}" = "true" ]; then printf 'CONFIG_KPM=y\n' >> "$D"; fi
           echo "=== defconfig 尾部 ==="; tail -n 10 "$D"
 
+      - name: 4.19 兼容补丁（MODULE_IMPORT_NS 是 5.4+ 才有的宏）
+        working-directory: kernel
+        run: |
+          # 4.19 没有 MODULE_IMPORT_NS，留着会被当成隐式 int 函数定义而报错；
+          # 它只是 namespace import 提示，删掉对功能无影响（#if/#else 空块合法）
+          sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/core/init.c
+          grep -c 'MODULE_IMPORT_NS' drivers/kernelsu/core/init.c || echo "已清理"
+          sed -n '265,275p' drivers/kernelsu/core/init.c
+
       - name: 编译
         working-directory: kernel
         run: |
@@ -97,6 +114,9 @@ jobs:
           export KBUILD_BUILD_HOST=Github-Action
           export KBUILD_BUILD_USER=actions
           make O=out "${{ inputs.defconfig }}"
+          make -j"$(nproc --all)" O=out prepare
+          # 先只编驱动，出错 1-2 分钟就暴露，不用等整核
+          make -j"$(nproc --all)" O=out drivers/kernelsu/
           make -j"$(nproc --all)" O=out
 
       - name: 断言 config 没被 Kconfig 丢弃
