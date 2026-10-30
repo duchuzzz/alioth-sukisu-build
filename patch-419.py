@@ -189,21 +189,28 @@ if kb.exists():
 # ---- 针对性版本门控（4.19 缺字段 / 缺宏） ----
 
 # extension/cpu_spoof.c: struct clocksource 的 vdso_clock_mode 是 5.2+ 才有
+# 注意：这里只能逐行门控赋值语句，整块包裹会因为花括号嵌套位置判断错误而产生语法错误
 cpu = drv / "extension" / "cpu_spoof.c"
 if cpu.exists():
     t = cpu.read_text(encoding="utf-8", errors="replace")
     if "KSU_CS_GUARD" not in t:
-        pat = re.compile(r"(\n[ ]*\{\n[ ]*struct clocksource \*\*curr_cs_ptr =.*?\n[ ]*\}\n)", re.S)
-        m = pat.search(t)
-        if m:
-            wrapped = (
-                "\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0) /* KSU_CS_GUARD */"
-                + m.group(1)
-                + "#endif /* KSU_CS_GUARD */\n"
-            )
-            t = t[: m.start(1)] + wrapped + t[m.end(1) :]
-            cpu.write_text(t, encoding="utf-8")
-            print("[+] extension/cpu_spoof.c: clocksource.vdso_clock_mode 已加版本门控")
+        old_assign = (
+            "                        (*curr_cs_ptr)->vdso_clock_mode =\n"
+            "                            VDSO_CLOCKMODE_ARCHTIMER;\n"
+        )
+        new_assign = (
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0) /* KSU_CS_GUARD */\n"
+            "                        (*curr_cs_ptr)->vdso_clock_mode =\n"
+            "                            VDSO_CLOCKMODE_ARCHTIMER;\n"
+            "#else\n"
+            "                        (void)curr_cs_ptr;\n"
+            "#endif /* KSU_CS_GUARD */\n"
+        )
+        if old_assign in t:
+            cpu.write_text(t.replace(old_assign, new_assign), encoding="utf-8")
+            print("[+] extension/cpu_spoof.c: clocksource.vdso_clock_mode 赋值已门控")
+        else:
+            print("[!] cpu_spoof.c 没找到预期赋值语句，跳过")
 
 # policy/app_profile.c: seccomp.filter_count 是 5.9+ 才有
 prof = drv / "policy" / "app_profile.c"
