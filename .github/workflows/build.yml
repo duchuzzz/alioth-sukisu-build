@@ -38,6 +38,9 @@ jobs:
         with:
           swap-size-gb: 8
 
+      - name: 取 CI 仓库（拿兼容补丁脚本）
+        uses: actions/checkout@v4
+
       - name: 取内核源码（含子模块：security/baseband-guard 是符号链接，缺了 config 就报错）
         uses: actions/checkout@v4
         with:
@@ -92,14 +95,11 @@ jobs:
           if [ "${{ inputs.enable_kpm }}" = "true" ]; then printf 'CONFIG_KPM=y\n' >> "$D"; fi
           echo "=== defconfig 尾部 ==="; tail -n 10 "$D"
 
-      - name: 4.19 兼容补丁（MODULE_IMPORT_NS 是 5.4+ 才有的宏）
-        working-directory: kernel
+      - name: 4.19 兼容补丁（nofault / TWA_RESUME / MODULE_IMPORT_NS）
         run: |
-          # 4.19 没有 MODULE_IMPORT_NS，留着会被当成隐式 int 函数定义而报错；
-          # 它只是 namespace import 提示，删掉对功能无影响（#if/#else 空块合法）
-          sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/core/init.c
-          grep -c 'MODULE_IMPORT_NS' drivers/kernelsu/core/init.c || echo "已清理"
-          sed -n '265,275p' drivers/kernelsu/core/init.c
+          python3 patch-419.py kernel
+          echo "=== 确认打过 ==="
+          grep -rl 'ksu-4.19-compat: start' kernel/drivers/kernelsu --include='*.c' | head
 
       - name: 编译
         working-directory: kernel
