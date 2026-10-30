@@ -138,4 +138,41 @@ if kb.exists():
         kb.write_text(text, encoding="utf-8")
         print("[+] Kbuild: 4.x 用 file_wrapper_stub.o 替代 file_wrapper.o")
 
+# pkg_observer.c 依赖 5.9+ 的 fsnotify API（handle_inode_event / fsnotify_add_inode_mark），
+# 4.19 换成空实现，保留 ksu_observer_init/exit 两个符号
+OBS_STUB = '''/* 4.19 compat: fsnotify inode-event API 差异过大，关闭 packages.list 变更监听；
+ * throne 扫描仍由开机流程和包变更路径触发 */
+#include <linux/kernel.h>
+#include "manager/manager_observer.h"
+
+int ksu_observer_init(void)
+{
+    pr_info("ksu observer: disabled on 4.19\\n");
+    return 0;
+}
+
+void ksu_observer_exit(void)
+{
+}
+'''
+obs = drv / "manager" / "pkg_observer_stub.c"
+if not obs.exists():
+    obs.write_text(OBS_STUB, encoding="utf-8")
+    print("[+] created manager/pkg_observer_stub.c")
+
+if kb.exists():
+    text = kb.read_text(encoding="utf-8", errors="replace")
+    marker = "kernelsu-objs += manager/pkg_observer.o"
+    if marker in text and "pkg_observer_stub.o" not in text:
+        text = text.replace(
+            marker,
+            "ifeq ($(VERSION),4)\n"
+            "kernelsu-objs += manager/pkg_observer_stub.o\n"
+            "else\n"
+            "kernelsu-objs += manager/pkg_observer.o\n"
+            "endif",
+        )
+        kb.write_text(text, encoding="utf-8")
+        print("[+] Kbuild: 4.x 用 pkg_observer_stub.o 替代 pkg_observer.o")
+
 
