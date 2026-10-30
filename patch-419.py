@@ -14,11 +14,18 @@ SHIM = f"""/* {MARK} */
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/string.h>
 
 /* 4.19 没有 strncpy_from_user_nofault（5.8 引入）；sucompat 只在进程上下文用，直接走可睡眠版本 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 #ifndef strncpy_from_user_nofault
 #define strncpy_from_user_nofault(dst, src, cnt) strncpy_from_user((dst), (src), (cnt))
+#endif
+#ifndef copy_to_kernel_nofault
+#define copy_to_kernel_nofault(dst, src, size) memcpy((dst), (src), (size))
+#endif
+#ifndef copy_from_kernel_nofault
+#define copy_from_kernel_nofault(dst, src, size) memcpy((dst), (src), (size))
 #endif
 #endif
 
@@ -31,7 +38,12 @@ SHIM = f"""/* {MARK} */
 /* ksu-4.19-compat: end */
 """
 
-needles = ("strncpy_from_user_nofault", "TWA_RESUME")
+needles = (
+    "strncpy_from_user_nofault",
+    "TWA_RESUME",
+    "copy_to_kernel_nofault",
+    "copy_from_kernel_nofault",
+)
 patched = 0
 for f in sorted(drv.rglob("*.c")):
     text = f.read_text(encoding="utf-8", errors="replace")
@@ -52,3 +64,19 @@ if init.exists():
         print("[+] removed MODULE_IMPORT_NS from core/init.c")
 
 print(f"[+] compat patched files: {patched}")
+
+# objsec.h 里 #include "flask.h"，而 flask.h 只生成在 objtree/security/selinux 下；
+# 在 drivers/ 里编译 selinux 相关代码需要显式加 include 路径（且要传给子目录）
+kb = drv / "Kbuild"
+if kb.exists():
+    text = kb.read_text(encoding="utf-8", errors="replace")
+    if "security/selinux" not in text:
+        text += (
+            "\n# 4.19 compat: flask.h 生成在 $(objtree)/security/selinux，跨目录编译需要显式 include\n"
+            "subdir-ccflags-y += -I$(objtree)/security/selinux\n"
+        )
+        kb.write_text(text, encoding="utf-8")
+        print("[+] added -I$(objtree)/security/selinux to drivers/kernelsu/Kbuild")
+    else:
+        print("[=] Kbuild 已有 selinux include 路径")
+
