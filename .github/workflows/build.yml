@@ -115,6 +115,9 @@ jobs:
           export KBUILD_BUILD_USER=actions
           make O=out "${{ inputs.defconfig }}"
           make -j"$(nproc --all)" O=out prepare
+          # objsec.h 里 #include "flask.h"，flask.h 是 security/selinux 构建时生成的，
+          # 而 drivers/ 比 security/ 先编，先把 selinux 目录编出来再编驱动
+          make -j"$(nproc --all)" O=out security/selinux/
           # 先只编驱动，出错 1-2 分钟就暴露，不用等整核
           make -j"$(nproc --all)" O=out drivers/kernelsu/
           make -j"$(nproc --all)" O=out
