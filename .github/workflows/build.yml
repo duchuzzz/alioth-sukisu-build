@@ -38,13 +38,14 @@ jobs:
         with:
           swap-size-gb: 8
 
-      - name: 取内核源码
+      - name: 取内核源码（含子模块：security/baseband-guard 是符号链接，缺了 config 就报错）
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.kernel_repo }}
           ref: ${{ inputs.kernel_ref }}
           path: kernel
           fetch-depth: 1
+          submodules: recursive
 
       - name: 安装构建依赖
         run: |
