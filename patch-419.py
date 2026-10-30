@@ -35,6 +35,17 @@ SHIM = f"""/* {MARK} */
 #define TWA_RESUME true
 #endif
 #endif
+
+/* 4.19 没有 seccomp action cache 的架构编号宏（5.9 引入），用 syscall 总数兜底 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+#ifndef SECCOMP_ARCH_NATIVE_NR
+#ifdef __NR_syscalls
+#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls
+#else
+#define SECCOMP_ARCH_NATIVE_NR 512
+#endif
+#endif
+#endif
 /* ksu-4.19-compat: end */
 """
 
@@ -43,6 +54,7 @@ needles = (
     "TWA_RESUME",
     "copy_to_kernel_nofault",
     "copy_from_kernel_nofault",
+    "SECCOMP_ARCH_NATIVE_NR",
 )
 patched = 0
 for f in sorted(drv.rglob("*.c")):
@@ -62,6 +74,15 @@ if init.exists():
     if len(kept) != len(lines):
         init.write_text("".join(kept), encoding="utf-8")
         print("[+] removed MODULE_IMPORT_NS from core/init.c")
+
+# 4.19 没有 include/uapi/linux/mount.h，但 include/linux/mount.h 一样提供 MS_PRIVATE/MS_REC
+mnt = drv / "infra" / "su_mount_ns.c"
+if mnt.exists():
+    text = mnt.read_text(encoding="utf-8", errors="replace")
+    if "<uapi/linux/mount.h>" in text:
+        text = text.replace("#include <uapi/linux/mount.h>", "#include <linux/mount.h>")
+        mnt.write_text(text, encoding="utf-8")
+        print("[+] infra/su_mount_ns.c: uapi/linux/mount.h -> linux/mount.h")
 
 print(f"[+] compat patched files: {patched}")
 
