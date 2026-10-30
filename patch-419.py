@@ -101,3 +101,41 @@ if kb.exists():
     else:
         print("[=] Kbuild 已有 selinux include 路径")
 
+# file_wrapper.c 用到了 5.x 才有的 file_operations 成员（iopoll / remap_file_range），
+# 4.19 上换成空实现；只在 4.x 内核里替换，5/6.x 仍用原文件
+STUB = '''/* 4.19 compat: file_operations 没有 iopoll / remap_file_range，用空实现替代 */
+#include <linux/kernel.h>
+#include <linux/errno.h>
+#include "infra/file_wrapper.h"
+
+int ksu_install_file_wrapper(int fd)
+{
+    (void)fd;
+    return -EOPNOTSUPP;
+}
+
+void ksu_file_wrapper_init(void)
+{
+}
+'''
+stub_path = drv / "infra" / "file_wrapper_stub.c"
+if not stub_path.exists():
+    stub_path.write_text(STUB, encoding="utf-8")
+    print("[+] created infra/file_wrapper_stub.c")
+
+if kb.exists():
+    text = kb.read_text(encoding="utf-8", errors="replace")
+    marker = "kernelsu-objs += infra/file_wrapper.o"
+    if marker in text and "file_wrapper_stub.o" not in text:
+        text = text.replace(
+            marker,
+            "ifeq ($(VERSION),4)\n"
+            "kernelsu-objs += infra/file_wrapper_stub.o\n"
+            "else\n"
+            "kernelsu-objs += infra/file_wrapper.o\n"
+            "endif",
+        )
+        kb.write_text(text, encoding="utf-8")
+        print("[+] Kbuild: 4.x 用 file_wrapper_stub.o 替代 file_wrapper.o")
+
+
