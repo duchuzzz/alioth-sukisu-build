@@ -2,6 +2,7 @@
 # 为 Linux 4.19 内核打 SukiSU 4.x 兼容补丁（幂等，可重复运行）
 # 用法: python3 patch-419.py kernel        # 内核源码根目录
 import pathlib
+import re
 import sys
 
 kernel = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "kernel")
@@ -15,6 +16,12 @@ SHIM = f"""/* {MARK} */
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
+#include <linux/sched/task.h>
+
+/* 4.19 没有 fallthrough 宏（5.4 引入） */
+#ifndef fallthrough
+#define fallthrough __attribute__((__fallthrough__))
+#endif
 
 /* 4.19 没有 strncpy_from_user_nofault（5.8 引入）；sucompat 只在进程上下文用，直接走可睡眠版本 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
@@ -55,6 +62,8 @@ needles = (
     "copy_to_kernel_nofault",
     "copy_from_kernel_nofault",
     "SECCOMP_ARCH_NATIVE_NR",
+    "put_task_struct",
+    "fallthrough",
 )
 patched = 0
 for f in sorted(drv.rglob("*.c")):
@@ -176,3 +185,37 @@ if kb.exists():
         print("[+] Kbuild: 4.x 用 pkg_observer_stub.o 替代 pkg_observer.o")
 
 
+
+# ---- 针对性版本门控（4.19 缺字段 / 缺宏） ----
+
+# extension/cpu_spoof.c: struct clocksource 的 vdso_clock_mode 是 5.2+ 才有
+cpu = drv / "extension" / "cpu_spoof.c"
+if cpu.exists():
+    t = cpu.read_text(encoding="utf-8", errors="replace")
+    if "KSU_CS_GUARD" not in t:
+        pat = re.compile(r"(\n[ ]*\{\n[ ]*struct clocksource \*\*curr_cs_ptr =.*?\n[ ]*\}\n)", re.S)
+        m = pat.search(t)
+        if m:
+            wrapped = (
+                "\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0) /* KSU_CS_GUARD */"
+                + m.group(1)
+                + "#endif /* KSU_CS_GUARD */\n"
+            )
+            t = t[: m.start(1)] + wrapped + t[m.end(1) :]
+            cpu.write_text(t, encoding="utf-8")
+            print("[+] extension/cpu_spoof.c: clocksource.vdso_clock_mode 已加版本门控")
+
+# policy/app_profile.c: seccomp.filter_count 是 5.9+ 才有
+prof = drv / "policy" / "app_profile.c"
+if prof.exists():
+    t = prof.read_text(encoding="utf-8", errors="replace")
+    old = "    atomic_set(&current->seccomp.filter_count, 0);"
+    if old in t and "KSU_SECCOMP_CNT_GUARD" not in t:
+        t = t.replace(
+            old,
+            "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) /* KSU_SECCOMP_CNT_GUARD */\n"
+            + old
+            + "\n#endif /* KSU_SECCOMP_CNT_GUARD */",
+        )
+        prof.write_text(t, encoding="utf-8")
+        print("[+] policy/app_profile.c: seccomp.filter_count 已加版本门控")
